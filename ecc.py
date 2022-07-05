@@ -213,7 +213,7 @@ class S256Point(Point):
         else:
             prefix = b'\x00'
 
-        return encode_base58_checksum(prefix, h160)
+        return encode_base58_checksum(prefix + h160)
 
 
 G = S256Point(
