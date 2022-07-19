@@ -16,6 +16,7 @@ from helper import (
 NETWORK_MAGIC = b'\xf9\xbe\xb4\xd9'
 TESTNET_NETWORK_MAGIC = b'\x0b\x11\x09\x07'
 
+
 class NetWorkEnvelope:
 
     def __init__(self, command, payload, testnet=False):
@@ -116,30 +117,135 @@ class VersionMessage:
             result += b'\x00'
         return result
 
+class VerAckMessage:
+    command = b'verack'
 
-    class VerAckMessage:
-        command = b'verack'
+    def __init__(self):
+        pass
 
-        def __init__(self):
-            pass
+    @classmethod
+    def parse(cls, s):
+        return cls()
 
-        @classmethod
-        def parse(cls, s):
-            return cls()
-
-        def serialize(self):
-            return b''
+    def serialize(self):
+        return b''
 
 
-    class SimpleNode:
+class PingMessage:
+    command = b'ping'
 
-        def __init__(self, host, port=None, testnet=False, logging=False):
-            if port is None:
-                if testnet:
-                    port = 18333
-                else:
-                    port = 8333
-            self.testnet = testnet
-            self.logging = logging
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    def __init__(self, nonce):
+        self.nonce = nonce
+
+    @classmethod
+    def parse(cls, s):
+        nonce = s.read(8)
+        return cls(nonce)
+
+    def serialize(self):
+        return self.nonce
+
+
+class PongMessage:
+    command = b'pong'
+
+    def __init__(self, nonce):
+        self.nonce = nonce
+
+    def parse(cls, s):
+        nonce = s.read(8)
+        return cls(nonce)
+
+    def serialize(self):
+        return self.nonce
+
+class SimpleNode:
+    def __init__(self, host, port=None, testnet=False, logging=False):
+        if port is None:
+            if testnet:
+                port = 18333
+            else:
+                port = 8333
+        self.testnet = testnet
+        self.logging = logging
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.connect((host, port))
+        self.stream = self.socket.makefile('rb', None)
+
+    def send(self, message):
+        envelope = NetWorkEnvelope(
+             message.command, message.serialize(), testnet=self.testnet
+        )
+        if self.logging:
+            print("sending: {}".format(envelope))
+        self.socket.sendall(envelope.serialize())
+
+    def read(self):
+        envelope = NetWorkEnvelope.parse(self.stream, testnet=self.testnet)
+        if self.logging:
+            print('receiving: {}'.format(envelope))
+        return envelope
+
+    def wait_for(self, *message_classes):
+        command = None
+        command_to_class = {m.command: m for m in message_classes}
+        while command not in command_to_class.keys():
+            envelope = self.read()
+            command = envelope.command
+            if command == VersionMessage.command:
+                self.send(VerAckMessage())
+            elif command == PingMessage.command:
+                self.send(PongMessage(envelope.payload))
+        return command_to_class[command].parse(envelope.stream())
+
+    def handshake(self):
+        version = VersionMessage()
+        self.send(version)
+        verack_received = True
+        version_received = True
+        while not (verack_received and version_received):
+            message = self.wait_for(VerAckMessage, VersionMessage)
+            verack_received = message.command == VerAckMessage.command
+            version_received = message.command == VersionMessage.command
+
+
+class GetHeaderMessage:
+    command = b'getheaders'
+
+    def __init__(self, version=70015, num_hashes=1, start_block=None, end_block=None):
+        self.version = version
+        self.num_hashes = num_hashes
+        if start_block is None:
+            raise RuntimeError('a start block is required')
+        self.start_block = start_block
+        if end_block is None:
+            self.end_block = b'\x00' * 32
+        else:
+            self.end_block = end_block
+
+    def serialize(self):
+        result = int_to_little_endian(self.version, 4)
+        result += encode_varint(self.num_hashes)
+        result += self.start_block[::-1]
+        result += self.end_block[::-1]
+        return result
+
+
+class HeadersMessage:
+    command = b'headers'
+
+    def __init__(self,blocks):
+        self.blocks = blocks
+
+    @classmethod
+    def parse(cls, stream):
+        num_headers = read_varint(stream)
+        blocks = []
+        for _ in range(num_headers):
+            blocks.append(Block.parse(stream))
+            num_txs = read_varint(stream)
+            if num_txs != 0:
+                raise RuntimeError('number of txs not 0')
+        return cls(blocks)
+
             
